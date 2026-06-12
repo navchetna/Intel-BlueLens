@@ -4,6 +4,7 @@ import {
   MLPUpProj,
   MLPDownProj,
   RMSNorm,
+  QKNorm,
   SiLU,
   TransformBlock,
   ModelArchitectureGraph,
@@ -14,7 +15,7 @@ import {
 // Plamo 3: Dense causal decoder with interleaved Sliding Window Attention
 // Alternates between SWA (local) and GQA (global) layers
 export function buildPlamo3Architecture(config: any): ModelArchitectureGraph {
-  const numLayers = config.num_hidden_layers || 32;
+  const numLayers = config.num_hidden_layers || 24;
   const blocks: TransformBlock[] = [];
 
   for (let i = 0; i < numLayers; i++) {
@@ -23,6 +24,7 @@ export function buildPlamo3Architecture(config: any): ModelArchitectureGraph {
 
     blocks.push({
       attention_norm: new RMSNorm(config.hidden_size, config.rms_norm_eps || 1e-6),
+      qk_norm: new QKNorm(config.hidden_size, config.rms_norm_eps || 1e-6),
       attention: isSlidingWindow
         ? new SlidingWindowAttention(config.num_attention_heads || 32, 512)
         : new GroupedQueryAttention(

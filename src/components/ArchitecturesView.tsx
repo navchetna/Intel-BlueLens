@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { architecturesData } from '../dataArchitectures';
+import { getModelArchitecture } from '../models';
+import type { Component, ModelArchitectureGraph, TransformBlock } from '../contracts';
 import { Info } from 'lucide-react';
 
 // ─── Box — defined OUTSIDE ArchitecturesView to prevent remount on hover ────
@@ -26,6 +28,55 @@ function Box({ title, details, className = "", onHover }: {
       )}
     </div>
   );
+}
+
+const componentLabels: Record<string, string> = {
+  Embedding: 'Token Embedding',
+  RMSNorm: 'RMSNorm',
+  QKNorm: 'QK-Norm',
+  GroupedQueryAttention: 'Grouped-Query Attention',
+  MultiHeadAttention: 'Multi-Head Attention',
+  MultiLatentAttention: 'Multi-Latent Attention',
+  SlidingWindowAttention: 'Sliding Window Attention',
+  GatedDeltaNet: 'Gated DeltaNet',
+  MLPUpProj: 'Linear Up',
+  MLPDownProj: 'Linear Down',
+  SiLU: 'SiLU / SwiGLU',
+  GELU: 'GELU',
+  GeGLU: 'GeGLU',
+  ReLU: 'ReLU',
+  Linear: 'Linear Output',
+};
+
+function componentLabel(component?: Component) {
+  if (!component) return 'Component';
+  return componentLabels[component.type] ?? component.type;
+}
+
+function componentDetails(component?: Component) {
+  if (!component) return {};
+  return Object.fromEntries(Object.entries(component).filter(([key]) => key !== 'type'));
+}
+
+function componentSignature(component?: Component) {
+  return component ? JSON.stringify({ type: component.type, ...componentDetails(component) }) : '';
+}
+
+function uniqueAttentionBlocks(graph: ModelArchitectureGraph) {
+  const seen = new Set<string>();
+  return graph.blocks.reduce<{ block: TransformBlock; layer: number }[]>((items, block, layer) => {
+    const signature = componentSignature(block.attention);
+    if (!seen.has(signature)) {
+      seen.add(signature);
+      items.push({ block, layer });
+    }
+    return items;
+  }, []);
+}
+
+function attentionPatternLabel(graph: ModelArchitectureGraph) {
+  const pattern = graph.blocks.slice(0, 8).map(block => componentLabel(block.attention));
+  return Array.from(new Set(pattern)).join(' / ');
 }
 
 // ─── ArchitectureDiagram — defined OUTSIDE ArchitecturesView ────────────────
@@ -56,10 +107,14 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
     if (!arch) return null;
     
     const config = arch.config;
+    const graph = getModelArchitecture(arch.id, config);
+    const primaryBlock = graph.blocks[0];
+    const attentionBlocks = uniqueAttentionBlocks(graph);
+    const attentionTypes = new Set(graph.blocks.map(block => block.attention.type));
     const hasMoE = !!config.moe_experts;
-    const hasMLA = arch.id.includes('deepseek');
-    const hasGDN = arch.id.includes('qwen');
-    const isPlamo = arch.id.includes('plamo');
+    const hasMLA = attentionTypes.has('MultiLatentAttention');
+    const hasGDN = attentionTypes.has('GatedDeltaNet');
+    const attentionSummary = attentionPatternLabel(graph);
 
     return (
       <div 
@@ -101,24 +156,24 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                 </div>
                 
                 <div className="w-6 border-t border-intel-primary/50 border-dashed" />
-                <Box onHover={onHover} title="Token Embedding" className="min-w-[120px] h-16 flex items-center justify-center bg-intel-primary/5 border-intel-primary/30" details={{ vocab_size: config.vocab_size, hidden_size: config.hidden_size }} />
+                <Box onHover={onHover} title={componentLabel(graph.vocab_search)} className="min-w-[120px] h-16 flex items-center justify-center bg-intel-primary/5 border-intel-primary/30" details={componentDetails(graph.vocab_search)} />
                 
                 <div className="w-6 border-t border-intel-primary/50 border-dashed" />
                 <div className="min-w-[120px] h-20 border-2 border-intel-primary/20 bg-intel-bg rounded-lg flex flex-col items-center justify-center p-3 cursor-pointer hover:border-intel-primary transition-colors shadow-sm"
-                  onMouseEnter={() => onHover({ title: 'Decoder Block Stack', details: { num_hidden_layers: config.num_hidden_layers, hidden_size: config.hidden_size, architectures: config.architectures } })}
+                  onMouseEnter={() => onHover({ title: 'Decoder Block Stack', details: { num_layers: graph.num_layers, hidden_size: graph.hidden_size, attention_pattern: attentionSummary, architectures: config.architectures } })}
                   onMouseLeave={() => onHover(null)}
                 >
                   <span className="text-sm font-bold text-intel-dark uppercase tracking-wide text-center">Model Layer</span>
-                  <span className="text-[10px] text-intel-primary font-mono mt-1 bg-intel-primary/10 px-2 py-0.5 rounded whitespace-nowrap">× {config.num_hidden_layers} Blocks</span>
+                  <span className="text-[10px] text-intel-primary font-mono mt-1 bg-intel-primary/10 px-2 py-0.5 rounded whitespace-nowrap">× {graph.num_layers} Blocks</span>
                 </div>
 
                 <div className="w-6 border-t border-intel-primary/50 border-dashed" />
-                <Box onHover={onHover} title="Final RMSNorm" className="min-w-[120px] h-16 flex items-center justify-center bg-intel-bg border-intel-border/50" />
+                <Box onHover={onHover} title={`Final ${componentLabel(graph.final_norm)}`} className="min-w-[120px] h-16 flex items-center justify-center bg-intel-bg border-intel-border/50" details={componentDetails(graph.final_norm)} />
                 
                 <div className="w-6 border-t border-intel-primary/50 border-dashed relative">
                   <span className="absolute -top-4 left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] text-intel-muted/80 font-mono">Vocab</span>
                 </div>
-                <Box onHover={onHover} title="Linear Output" className="min-w-[120px] h-16 flex items-center justify-center bg-intel-primary/5 border-intel-primary/30" details={{ vocab_size: config.vocab_size }} />
+                <Box onHover={onHover} title={componentLabel(graph.lm_head)} className="min-w-[120px] h-16 flex items-center justify-center bg-intel-primary/5 border-intel-primary/30" details={componentDetails(graph.lm_head)} />
               </div>
             </div>
 
@@ -140,7 +195,7 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                 <div className="h-full border border-intel-primary/20 bg-intel-bg/50 rounded-xl p-4 flex flex-row items-center relative group hover:border-intel-primary transition-colors shadow-sm gap-3">
                   <div className="absolute -top-3 left-6 bg-white border border-intel-border text-[9px] uppercase font-bold tracking-widest text-intel-dark px-2 py-0.5 rounded-full shadow-sm">Attention Block</div>
                   
-                  <Box onHover={onHover} title="RMSNorm (Pre)" className="w-24 h-16 flex items-center justify-center p-2 text-center" details={{ rms_norm_eps: config.rms_norm_eps }} />
+                  <Box onHover={onHover} title={componentLabel(primaryBlock.attention_norm)} className="w-24 h-16 flex items-center justify-center p-2 text-center" details={componentDetails(primaryBlock.attention_norm)} />
                   <div className="w-4 border-t border-intel-primary/50" />
                   
                   <div className="flex flex-row items-center gap-2">
@@ -149,35 +204,30 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                       <span className="text-[8px] text-intel-muted font-mono whitespace-nowrap">θ: {config.rope_theta || '10k'}</span>
                     </div>
                     
-                    {hasMLA ? (
-                      <div className="w-48 h-16 flex flex-row items-center gap-1 rounded bg-intel-primary/5 border border-intel-primary/30 p-1">
-                        <Box onHover={onHover} title="Latent Compress" className="w-[45%] text-[9px] h-full shadow-none border-intel-primary/40 bg-white flex items-center justify-center text-center p-1 leading-tight" />
-                        <span className="text-[7px] text-center text-intel-primary font-mono tracking-widest leading-none rotate-180" style={{ writingMode: 'vertical-rl' }}>KV Cache</span>
-                        <Box onHover={onHover} title="MLA Expand" className="w-[45%] text-[9px] h-full shadow-none border-intel-primary/40 bg-intel-primary text-white flex items-center justify-center text-center p-1 leading-tight" />
-                      </div>
-                    ) : hasGDN ? (
-                      <div className="w-48 h-16 flex flex-row items-center gap-1 rounded bg-intel-primary/5 border border-intel-primary/30 p-1">
-                        <Box onHover={onHover} title="Data Gating" className="w-[45%] text-[9px] h-full shadow-none border-intel-primary/40 bg-white flex items-center justify-center text-center p-1 leading-tight" />
-                        <span className="text-[7px] text-center text-intel-primary font-mono tracking-widest leading-none rotate-180" style={{ writingMode: 'vertical-rl' }}>Delta Upd</span>
-                        <Box onHover={onHover} title="State Matrix" className="w-[45%] text-[9px] h-full shadow-none bg-intel-primary text-white border-none flex items-center justify-center text-center p-1 leading-tight" />
-                      </div>
-                    ) : (
-                      <div className="w-32 h-16 flex items-center justify-center">
-                        <Box 
-                          onHover={onHover}
-                          title={config.num_attention_heads !== config.num_key_value_heads ? "Grouped-Query Attention" : "Multi-Head Attention"} 
-                          className="w-full h-full p-2 bg-intel-primary text-white border-intel-alt text-[10px] flex items-center justify-center text-center leading-tight" 
-                        />
-                      </div>
+                    {primaryBlock.qk_norm && (
+                      <>
+                        <div className="w-4 border-t border-intel-primary/50" />
+                        <Box onHover={onHover} title={componentLabel(primaryBlock.qk_norm)} className="w-24 h-16 p-2 flex items-center justify-center bg-slate-50 border-slate-300 text-center text-[9px]" details={componentDetails(primaryBlock.qk_norm)} />
+                        <div className="w-4 border-t border-intel-primary/50" />
+                      </>
                     )}
+                    
+                    <div className="flex flex-row items-center gap-2">
+                      {attentionBlocks.map(({ block, layer }) => (
+                        <div key={`${layer}-${componentSignature(block.attention)}`} className="w-36 h-16 flex flex-col items-center justify-center gap-1">
+                          <Box 
+                            onHover={onHover}
+                            title={componentLabel(block.attention)} 
+                            className="w-full h-full p-2 bg-intel-primary text-white border-intel-alt text-[10px] flex items-center justify-center text-center leading-tight" 
+                            details={{ layer_pattern_starts_at: layer, ...componentDetails(block.attention) }}
+                          />
+                          {attentionBlocks.length > 1 && (
+                            <span className="text-[8px] text-intel-muted font-mono uppercase tracking-wide">Layer {layer}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  
-                  {isPlamo && (
-                    <>
-                      <div className="w-4 border-t border-intel-primary/50" />
-                      <Box onHover={onHover} title="QK-Norm" className="w-20 h-16 p-2 flex items-center justify-center bg-slate-50 border-slate-300 text-center text-[9px]" details={{ desc: 'Per-head RMSNorm on Q and K before RoPE (PLaMo-3 specific)', hidden_size: config.hidden_size }} />
-                    </>
-                  )}
                 </div>
 
                 <div className="bg-white border border-intel-border rounded-full w-6 h-6 flex items-center justify-center text-xs text-intel-primary font-bold z-10 shadow-sm shrink-0">+</div>
@@ -186,7 +236,7 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                 <div className="h-full border border-intel-primary/20 bg-intel-bg/50 rounded-xl p-4 flex flex-row items-center relative group hover:border-intel-primary transition-colors shadow-sm gap-3">
                   <div className="absolute -top-3 left-6 bg-white border border-intel-border text-[9px] uppercase font-bold tracking-widest text-intel-dark px-2 py-0.5 rounded-full shadow-sm">FeedForward Module</div>
                   
-                  <Box onHover={onHover} title="RMSNorm (Pre)" className="w-24 h-16 p-2 flex items-center justify-center text-center" details={{ rms_norm_eps: config.rms_norm_eps }} />
+                  <Box onHover={onHover} title={componentLabel(primaryBlock.mlp_norm ?? primaryBlock.attention_norm)} className="w-24 h-16 p-2 flex items-center justify-center text-center" details={componentDetails(primaryBlock.mlp_norm ?? primaryBlock.attention_norm)} />
                   <div className="w-4 border-t border-intel-primary/50" />
                   
                   {hasMoE ? (
@@ -204,12 +254,12 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                       <div className="absolute -top-2.5 left-2 text-[8px] bg-white text-intel-primary border border-intel-primary/20 rounded px-1.5 py-0.5 font-mono z-10 shadow-sm leading-none whitespace-nowrap">
                         Dim: {config.intermediate_size}
                       </div>
-                      <Box onHover={onHover} title="Linear Up" className="w-20 h-full bg-intel-bg border-intel-border/50 text-[10px] flex items-center justify-center" />
+                      <Box onHover={onHover} title={componentLabel(primaryBlock.mlp_up)} className="w-20 h-full bg-intel-bg border-intel-border/50 text-[10px] flex items-center justify-center" details={componentDetails(primaryBlock.mlp_up)} />
                       <div className="h-full flex flex-col items-center justify-center relative px-1">
                         <div className="absolute w-full h-px bg-intel-primary/30 z-0 top-1/2" />
-                        <Box onHover={onHover} title={config.hidden_act || 'SwiGLU'} className="px-2 h-full bg-intel-primary text-white border-intel-alt z-10 text-[10px] flex items-center justify-center whitespace-nowrap" />
+                        <Box onHover={onHover} title={componentLabel(primaryBlock.activation)} className="px-2 h-full bg-intel-primary text-white border-intel-alt z-10 text-[10px] flex items-center justify-center whitespace-nowrap" details={componentDetails(primaryBlock.activation)} />
                       </div>
-                      <Box onHover={onHover} title="Linear Down" className="w-20 h-full bg-intel-bg border-intel-border/50 text-[10px] flex items-center justify-center" />
+                      <Box onHover={onHover} title={componentLabel(primaryBlock.mlp_down)} className="w-20 h-full bg-intel-bg border-intel-border/50 text-[10px] flex items-center justify-center" details={componentDetails(primaryBlock.mlp_down)} />
                     </div>
                   )}
 
@@ -260,7 +310,7 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
                     onMouseEnter={() => onHover({ title: 'Activation', details: { "Target": config.hidden_act || "SwiGLU / GELU", "Kernels": "Custom implementation (SYCL XPU / C++ CPU)" } })}
                     onMouseLeave={() => onHover(null)}
                  >
-                    <span className="text-[10px] font-bold text-intel-dark tracking-wide mb-3 text-center leading-none">Activation<br/><span className="text-[8px] text-intel-muted font-normal lowercase mt-1 inline-block">({isPlamo ? 'swiglu & gelu' : (config.hidden_act || "swiglu")})</span></span>
+                    <span className="text-[10px] font-bold text-intel-dark tracking-wide mb-3 text-center leading-none">Activation<br/><span className="text-[8px] text-intel-muted font-normal lowercase mt-1 inline-block">({componentLabel(primaryBlock.activation)})</span></span>
                     <div className="flex flex-col gap-2">
                        <span className="text-[9px] bg-violet-50 text-violet-700 border border-violet-200 px-2 py-1 rounded font-mono font-bold shadow-sm text-center transform scale-90 origin-center">XPU: SYCL</span>
                        <span className="text-[9px] bg-blue-50 text-blue-700 border border-blue-200 px-2 py-1 rounded font-mono font-bold shadow-sm text-center transform scale-90 origin-center">CPU: C++</span>
@@ -281,10 +331,10 @@ function ArchitectureDiagram({ archId, onDropToPane, onHover }: {
 
                  {/* Attention */}
                  <div className="w-36 border border-intel-border bg-intel-bg rounded-lg flex flex-col p-3 relative group cursor-pointer hover:border-intel-primary hover:shadow-md transition-all justify-center"
-                    onMouseEnter={() => onHover({ title: 'Attention Block', details: { "Target": hasGDN ? "Gated DeltaNet Core" : hasMLA ? "MLA Decode" : "MHA / GQA", "Kernels": hasGDN || hasMLA ? "Triton API / SYCL" : "Flash Attention (SYCL for XPU / C++ for CPU)" } })}
+                      onMouseEnter={() => onHover({ title: 'Attention Block', details: { "Target": attentionSummary, "Kernels": hasGDN || hasMLA ? "Triton API / SYCL" : "Flash Attention (SYCL for XPU / C++ for CPU)" } })}
                     onMouseLeave={() => onHover(null)}
                  >
-                    <span className="text-[10px] font-bold text-intel-dark tracking-wide mb-3 text-center">{hasGDN ? "Gated DeltaNet" : hasMLA ? "MLA Decode" : "Flash Attention"}</span>
+                      <span className="text-[10px] font-bold text-intel-dark tracking-wide mb-3 text-center">{attentionSummary}</span>
                     <div className="flex flex-col gap-2">
                        <span className="text-[9px] bg-violet-50 text-violet-700 border border-violet-200 px-2 py-1 rounded font-mono font-bold shadow-sm text-center leading-none flex items-center justify-center">XPU:<br/>{hasMLA || hasGDN ? "Triton/SYCL" : "Flash SYCL"}</span>
                        <span className="text-[9px] bg-blue-50 text-blue-700 border border-blue-200 px-2 py-1 rounded font-mono font-bold shadow-sm text-center leading-none flex items-center justify-center">CPU:<br/>{hasMLA || hasGDN ? "C++ Custom" : "Flash C++"}</span>

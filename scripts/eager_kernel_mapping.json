@@ -1,0 +1,254 @@
+{
+  "_comment": "Eager-mode CPU kernel clustering for PLaMo-3 (and similar transformer models).",
+  "_note":    "SEPARATE from optimized/torch.compile kernel mappings (kernel_mapping.json). Do NOT merge.",
+  "model":    "plamo-3-nict-2b",
+  "hardware": "CPU",
+  "execution_mode": "eager",
+  "profiler": "torch.profiler (Chrome trace format)",
+
+  "decoder_layer_sequence": [
+    {
+      "segment":     "o_proj",
+      "component":   "Linear",
+      "nn_module":   "RowParallelLinear",
+      "anchor":      "_C::onednn_mm",
+      "description": "Output projection from previous layer's attention",
+      "aten_ops": [
+        "aten::view",
+        "aten::empty",
+        "aten::reshape",
+        "aten::view",
+        "_C::onednn_mm",
+        "aten::item",
+        "aten::_local_scalar_dense",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "norm_post_attn",
+      "component":   "RMSNorm",
+      "nn_module":   "RMSNorm (post_attention_layernorm × 2)",
+      "anchor":      "aten::pow",
+      "description": "Post-attention RMSNorm + residual add; in vLLM eager mode two RMSNorm calls appear due to fused residual_add_norm pattern",
+      "aten_ops": [
+        "aten::pow",
+        "aten::result_type",
+        "aten::to",
+        "aten::mean",
+        "aten::sum",
+        "aten::fill_",
+        "aten::div_",
+        "aten::rsqrt",
+        "aten::add",
+        "aten::mul",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "mlp_gate_up",
+      "component":   "MLP",
+      "nn_module":   "MergedColumnParallelLinear (inside DenseMLP)",
+      "anchor":      "_C::onednn_mm",
+      "description": "Fused gate+up projection for SwiGLU MLP — largest single matmul in the layer",
+      "aten_ops": [
+        "aten::empty",
+        "aten::reshape",
+        "aten::view",
+        "_C::onednn_mm",
+        "aten::item",
+        "aten::_local_scalar_dense",
+        "aten::slice",
+        "aten::as_strided"
+      ]
+    },
+    {
+      "segment":     "swiglu",
+      "component":   "MLP",
+      "nn_module":   "DenseMLP (activation + gate·up multiply)",
+      "anchor":      "aten::silu",
+      "description": "SwiGLU nonlinearity: silu(gate) then element-wise multiply with up projection",
+      "aten_ops": [
+        "aten::silu",
+        "aten::slice",
+        "aten::as_strided",
+        "aten::mul"
+      ]
+    },
+    {
+      "segment":     "mlp_down",
+      "component":   "MLP",
+      "nn_module":   "RowParallelLinear (inside DenseMLP)",
+      "anchor":      "_C::onednn_mm",
+      "description": "Down projection — second largest matmul in the layer",
+      "aten_ops": [
+        "aten::empty",
+        "aten::reshape",
+        "aten::view",
+        "_C::onednn_mm",
+        "aten::item",
+        "aten::_local_scalar_dense",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "norm_pre_attn",
+      "component":   "RMSNorm",
+      "nn_module":   "RMSNorm (post_mlp_norm + input_layernorm × 2)",
+      "anchor":      "aten::pow",
+      "description": "Post-MLP residual + two RMSNorm calls: one wraps the MLP output, another is input_layernorm that normalises for the next attention block",
+      "aten_ops": [
+        "aten::pow",
+        "aten::result_type",
+        "aten::to",
+        "aten::mean",
+        "aten::sum",
+        "aten::fill_",
+        "aten::div_",
+        "aten::rsqrt",
+        "aten::add",
+        "aten::mul",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "qkv_proj",
+      "component":   "Linear",
+      "nn_module":   "QKVParallelLinear (inside Plamo3AttentionMixer)",
+      "anchor":      "_C::onednn_mm",
+      "description": "Fused QKV projection; output is immediately split by aten::split_with_sizes into Q, K, V tensors",
+      "aten_ops": [
+        "aten::empty",
+        "aten::reshape",
+        "aten::view",
+        "_C::onednn_mm",
+        "aten::item",
+        "aten::_local_scalar_dense",
+        "aten::split_with_sizes",
+        "aten::as_strided",
+        "aten::reshape",
+        "aten::_reshape_alias",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "qk_norm",
+      "component":   "RMSNorm",
+      "nn_module":   "Plamo3AttentionMixer — inline Q-norm + K-norm (PLaMo-specific, per-head RMSNorm)",
+      "anchor":      "aten::pow",
+      "description": "PLaMo-3 applies per-head RMSNorm on Q and K tensors before RoPE. Two norm clusters appear inline inside Plamo3AttentionMixer (not separate nn.Module).",
+      "aten_ops": [
+        "aten::pow",
+        "aten::result_type",
+        "aten::to",
+        "aten::mean",
+        "aten::sum",
+        "aten::fill_",
+        "aten::div_",
+        "aten::rsqrt",
+        "aten::add",
+        "aten::mul",
+        "aten::reshape",
+        "aten::view",
+        "aten::to",
+        "aten::_to_copy",
+        "aten::empty_strided",
+        "aten::copy_"
+      ]
+    },
+    {
+      "segment":     "rope",
+      "component":   "Attention",
+      "nn_module":   "Plamo3AttentionMixer — rotary embedding (inline)",
+      "anchor":      "_C::rotary_embedding",
+      "description": "Rotary position embedding applied to Q and K after QK-Norm",
+      "aten_ops": [
+        "_C::rotary_embedding",
+        "aten::empty",
+        "aten::view"
+      ]
+    },
+    {
+      "segment":     "attention",
+      "component":   "Attention",
+      "nn_module":   "Attention (inside Plamo3AttentionMixer)",
+      "anchor":      "vllm::unified_attention_with_output + _C::cpu_attention_with_kv_cache",
+      "description": "Core attention compute. Two ops appear for PLaMo-3's mixed SWA/GQA: unified_attention_with_output (SWA layers) and cpu_attention_with_kv_cache (GQA layers). KV cache writes happen via _C::cpu_attn_reshape_and_cache.",
+      "aten_ops": [
+        "vllm::unified_attention_with_output",
+        "aten::unbind",
+        "aten::select",
+        "aten::as_strided",
+        "_C::cpu_attn_reshape_and_cache",
+        "aten::slice",
+        "_C::cpu_attention_with_kv_cache"
+      ]
+    }
+  ],
+
+  "module_hierarchy": {
+    "Plamo3ForCausalLM": {
+      "children": ["Plamo3Decoder"],
+      "component": "Model"
+    },
+    "Plamo3Decoder": {
+      "children": ["Plamo3DecoderLayer × 24"],
+      "component": "Model"
+    },
+    "Plamo3DecoderLayer": {
+      "children": ["RMSNorm (input_layernorm)", "Plamo3AttentionMixer", "RMSNorm (post_attention_layernorm)", "DenseMLP"],
+      "component": "DecoderLayer"
+    },
+    "Plamo3AttentionMixer": {
+      "children": ["QKVParallelLinear", "Attention"],
+      "inline_ops": "QK-Norm (Q), QK-Norm (K), RotaryEmbedding",
+      "component": "Attention"
+    },
+    "QKVParallelLinear": {
+      "anchor_kernel": "_C::onednn_mm",
+      "component": "Linear"
+    },
+    "Attention": {
+      "kernels": ["vllm::unified_attention_with_output", "_C::cpu_attn_reshape_and_cache", "_C::cpu_attention_with_kv_cache"],
+      "component": "Attention"
+    },
+    "DenseMLP": {
+      "children": ["MergedColumnParallelLinear", "RowParallelLinear (down_proj)"],
+      "inline_ops": "aten::silu, aten::mul (SwiGLU gate)",
+      "component": "MLP"
+    },
+    "MergedColumnParallelLinear": {
+      "anchor_kernel": "_C::onednn_mm",
+      "note": "Fused gate+up projection; largest matmul per layer",
+      "component": "MLP"
+    },
+    "RowParallelLinear": {
+      "anchor_kernel": "_C::onednn_mm",
+      "note": "Used for both o_proj and down_proj",
+      "component": "Linear"
+    },
+    "RMSNorm": {
+      "kernels": ["aten::pow", "aten::mean", "aten::sum", "aten::fill_", "aten::div_", "aten::rsqrt", "aten::add (eps)", "aten::mul (scale)", "aten::mul (weight)"],
+      "component": "RMSNorm"
+    }
+  },
+
+  "dtype_cast_ops": {
+    "note": "These ops appear as overhead between major compute ops, representing BF16↔FP32 dtype casts in eager mode",
+    "ops": ["aten::to", "aten::_to_copy", "aten::empty_strided", "aten::copy_"]
+  }
+}

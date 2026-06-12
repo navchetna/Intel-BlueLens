@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect, type ChangeEvent } from 'react';
+import { useState, useMemo, useRef, useCallback, useEffect, type ChangeEvent, type RefObject } from 'react';
 import { Upload, X } from 'lucide-react';
 import {
   Component,
@@ -398,103 +398,232 @@ const COMPONENT_COLORS: Record<string, { bg: string; border: string; text: strin
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Layer → Kernel mapping view
+// EAGER-MODE kernel mapping (PLaMo-3 CPU, vLLM eager execution)
+// Kept SEPARATE from KERNEL_COMPONENT_MAP (which is for optimised/compiled mode)
+// Source: scripts/eager_kernel_mapping.json (generated from trace analysis)
 // ─────────────────────────────────────────────────────────────────────────────
-// Short labels assigned in-order per component within a layer
-const LINEAR_SEQ   = ['QKV', 'O-Proj', 'G+U', 'Down'];
-const NORM_SEQ     = ['Norm₁', 'Norm₂', 'Norm₃', 'Norm₄', 'Norm₅'];
-const COMP_SHORT: Record<string, string> = {
-  Attention: 'Attn', MLP: 'SiLU', AllReduce: 'AR',
-  Embedding: 'Emb', Scheduler: 'Sch', Other: '?',
+type EagerSegType =
+  | 'o_proj' | 'norm_post_attn' | 'mlp_gate_up' | 'swiglu' | 'mlp_down'
+  | 'norm_pre_attn' | 'qkv_proj' | 'qk_norm' | 'rope' | 'attention';
+
+interface EagerSegMeta {
+  component: string;  // maps to COMPONENT_COLORS keys + 'QKNorm'
+  label:     string;  // short display
+  title:     string;  // tooltip description
+  module:    string;  // originating nn.Module class name(s)
+}
+// Ordered array defines the SEQUENCE within one decoder layer
+const EAGER_SEG_ORDER: EagerSegType[] = [
+  'o_proj', 'norm_post_attn', 'mlp_gate_up', 'swiglu', 'mlp_down',
+  'norm_pre_attn', 'qkv_proj', 'qk_norm', 'rope', 'attention',
+];
+
+const EAGER_SEG_META: Record<EagerSegType, EagerSegMeta> = {
+  o_proj:         { component: 'Linear',    label: 'o_proj',    title: 'Output projection (RowParallelLinear → _C::onednn_mm)',           module: 'RowParallelLinear' },
+  norm_post_attn: { component: 'RMSNorm',   label: 'Norm ×2',   title: 'Post-attn RMSNorm + residual add (post_attention_layernorm)',     module: 'RMSNorm' },
+  mlp_gate_up:    { component: 'MLP',       label: 'MLP↑',      title: 'Gate+up fused projection (MergedColumnParallelLinear → onednn_mm)', module: 'MergedColumnParallelLinear' },
+  swiglu:         { component: 'MLP',       label: 'SwiGLU',    title: 'SiLU(gate) · up  —  SwiGLU activation (aten::silu + aten::mul)', module: 'DenseMLP' },
+  mlp_down:       { component: 'MLP',       label: 'MLP↓',      title: 'Down projection (RowParallelLinear → _C::onednn_mm)',             module: 'RowParallelLinear' },
+  norm_pre_attn:  { component: 'RMSNorm',   label: 'Norm ×2',   title: 'Post-MLP norm + input_layernorm (RMSNorm × 2)',                  module: 'RMSNorm' },
+  qkv_proj:       { component: 'Linear',    label: 'QKV',       title: 'Fused QKV projection (QKVParallelLinear → onednn_mm + split)',    module: 'QKVParallelLinear' },
+  qk_norm:        { component: 'RMSNorm',   label: 'QK-Norm',   title: 'PLaMo-3 per-head Q & K normalisation (inline in Plamo3AttentionMixer)', module: 'Plamo3AttentionMixer' },
+  rope:           { component: 'Attention', label: 'RoPE',      title: 'Rotary position embedding (_C::rotary_embedding)',               module: 'Plamo3AttentionMixer' },
+  attention:      { component: 'Attention', label: 'Attn',      title: 'Attention compute: SWA (unified_attention) + KV-cache + GQA (cpu_attention_with_kv_cache)', module: 'Attention' },
 };
 
-type EnrichedKernel = LayerKernel & {
-  shortLabel: string;
-  startPct: number;   // 0–100
-  centerPct: number;  // 0–100
-  pct: number;        // % of layer duration
+// Colour palette for eager segments  (SEPARATE from COMPONENT_COLORS)
+const EAGER_SEG_COLOR: Record<EagerSegType, string> = {
+  o_proj:         '#3b82f6',  // blue
+  norm_post_attn: '#94a3b8',  // slate
+  mlp_gate_up:    '#10b981',  // emerald
+  swiglu:         '#06b6d4',  // cyan
+  mlp_down:       '#059669',  // darker emerald
+  norm_pre_attn:  '#64748b',  // darker slate
+  qkv_proj:       '#8b5cf6',  // violet
+  qk_norm:        '#6366f1',  // indigo
+  rope:           '#f59e0b',  // amber
+  attention:      '#7c3aed',  // deep violet
 };
 
-function enrichLayer(kernels: LayerKernel[], layerDurMs: number): EnrichedKernel[] {
-  const seqCounters: Record<string, number> = {};
-  let cumPct = 0;
-  return kernels.map(k => {
-    const pct = layerDurMs > 0 ? (k.dur_ms / layerDurMs) * 100 : 0;
-    const startPct = cumPct;
-    const centerPct = cumPct + pct / 2;
-    cumPct += pct;
-    let shortLabel: string;
-    if (k.component === 'Linear') {
-      const i = seqCounters['Linear'] ?? 0; seqCounters['Linear'] = i + 1;
-      shortLabel = LINEAR_SEQ[i] ?? `Lin${i}`;
-    } else if (k.component === 'RMSNorm') {
-      const i = seqCounters['RMSNorm'] ?? 0; seqCounters['RMSNorm'] = i + 1;
-      shortLabel = NORM_SEQ[i] ?? `Norm`;
-    } else {
-      shortLabel = COMP_SHORT[k.component] ?? k.component.slice(0, 5);
-    }
-    return { ...k, shortLabel, startPct, centerPct, pct };
+// Eager-mode aten:: clusters per segment (the "separate kernel mapping" for CPU eager mode)
+// These are the aten:: ops that belong to each nn.Module in PLaMo-3 CPU eager execution.
+const EAGER_ATEN_CLUSTERS: Record<EagerSegType, string[]> = {
+  o_proj:         ['aten::view','aten::empty','aten::reshape','_C::onednn_mm','aten::item','aten::_local_scalar_dense','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  norm_post_attn: ['aten::pow','aten::result_type','aten::mean','aten::sum','aten::fill_','aten::div_','aten::rsqrt','aten::add','aten::mul','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  mlp_gate_up:    ['aten::empty','aten::reshape','aten::view','_C::onednn_mm','aten::item','aten::_local_scalar_dense','aten::slice','aten::as_strided'],
+  swiglu:         ['aten::silu','aten::slice','aten::as_strided','aten::mul'],
+  mlp_down:       ['aten::empty','aten::reshape','aten::view','_C::onednn_mm','aten::item','aten::_local_scalar_dense','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  norm_pre_attn:  ['aten::pow','aten::result_type','aten::mean','aten::sum','aten::fill_','aten::div_','aten::rsqrt','aten::add','aten::mul','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  qkv_proj:       ['aten::empty','aten::reshape','aten::view','_C::onednn_mm','aten::split_with_sizes','aten::as_strided','aten::_reshape_alias','aten::item','aten::_local_scalar_dense','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  qk_norm:        ['aten::pow','aten::result_type','aten::mean','aten::sum','aten::fill_','aten::div_','aten::rsqrt','aten::add','aten::mul','aten::reshape','aten::view','aten::to','aten::_to_copy','aten::empty_strided','aten::copy_'],
+  rope:           ['_C::rotary_embedding','aten::empty','aten::view'],
+  attention:      ['vllm::unified_attention_with_output','aten::unbind','aten::select','aten::as_strided','_C::cpu_attn_reshape_and_cache','aten::slice','_C::cpu_attention_with_kv_cache'],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Eager-mode segment detection (sequence-based, PLaMo CPU profile)
+// Assigns each LayerKernel to an EagerSegType by detecting anchor ops in order.
+// ─────────────────────────────────────────────────────────────────────────────
+function detectEagerSegments(kernels: LayerKernel[]): Map<EagerSegType, LayerKernel[]> {
+  const result = new Map<EagerSegType, LayerKernel[]>();
+  const push = (t: EagerSegType, k: LayerKernel) => {
+    if (!result.has(t)) result.set(t, []);
+    result.get(t)!.push(k);
+  };
+
+  // ── Step 1: locate anchor positions ──────────────────────────────────────
+  const mmIdxs: number[] = [];  // all _C::onednn_mm positions
+  let siluIdx = -1, ropeIdx = -1, attnIdx = -1;
+
+  for (let i = 0; i < kernels.length; i++) {
+    const n = kernels[i].name;
+    if (n.includes('onednn_mm'))                                              mmIdxs.push(i);
+    else if (n === 'aten::silu'             && siluIdx < 0)                   siluIdx = i;
+    else if (n.includes('rotary_embedding') && ropeIdx < 0)                   ropeIdx = i;
+    else if ((n.includes('unified_attention') || n.includes('cpu_attention_with_kv_cache')) && attnIdx < 0) attnIdx = i;
+  }
+
+  if (mmIdxs.length < 2) {
+    // Fallback: attribute everything via component field
+    for (const k of kernels) push('attention', k);
+    return result;
+  }
+
+  // ── Step 2: classify each onednn_mm ──────────────────────────────────────
+  type MmCls = 'o_proj' | 'gate_up' | 'down' | 'qkv';
+  const mmCls: MmCls[] = mmIdxs.map(pos => {
+    const window = kernels.slice(pos + 1, pos + 20).map(k => k.name);
+    if (window.includes('aten::split_with_sizes'))                    return 'qkv';
+    if (siluIdx > 0 && pos < siluIdx &&
+        !mmIdxs.some(p => p > pos && p < siluIdx))                   return 'gate_up';
+    return 'other' as unknown as MmCls;
   });
+  let otherCount = 0;
+  for (let i = 0; i < mmCls.length; i++) {
+    if ((mmCls[i] as unknown as string) === 'other') {
+      mmCls[i] = otherCount === 0 ? 'o_proj' : 'down';
+      otherCount++;
+    }
+  }
+
+  const oProjIdx  = mmIdxs[mmCls.indexOf('o_proj')]   ?? -1;
+  const gateUpIdx = mmIdxs[mmCls.indexOf('gate_up')]  ?? -1;
+  const downIdx   = mmIdxs[mmCls.indexOf('down')]     ?? -1;
+  const qkvIdx    = mmIdxs[mmCls.indexOf('qkv')]      ?? -1;
+
+  // ── Step 3: locate first 'aten::pow' in each region ──────────────────────
+  const firstPowAfter = (from: number, until: number) => {
+    for (let i = from; i < Math.min(until, kernels.length); i++)
+      if (kernels[i].name === 'aten::pow') return i;
+    return -1;
+  };
+  const norm1Start  = firstPowAfter(oProjIdx  + 1, gateUpIdx >= 0 ? gateUpIdx  : kernels.length);
+  const norm2Start  = firstPowAfter(downIdx   + 1, qkvIdx    >= 0 ? qkvIdx     : kernels.length);
+  const qkNormStart = firstPowAfter(qkvIdx    + 1, ropeIdx   >= 0 ? ropeIdx    : (attnIdx >= 0 ? attnIdx : kernels.length));
+
+  // ── Step 4: per-op assignment by position ────────────────────────────────
+  for (let i = 0; i < kernels.length; i++) {
+    const k = kernels[i];
+    let seg: EagerSegType;
+
+    if      (attnIdx    >= 0 && i >= attnIdx)                                              seg = 'attention';
+    else if (ropeIdx    >= 0 && i >= ropeIdx)                                              seg = 'rope';
+    else if (qkvIdx     >= 0 && i >= qkvIdx)
+      seg = (qkNormStart >= 0 && i >= qkNormStart) ? 'qk_norm' : 'qkv_proj';
+    else if (downIdx    >= 0 && i >= downIdx)
+      seg = (norm2Start  >= 0 && i >= norm2Start)  ? 'norm_pre_attn' : 'mlp_down';
+    else if (siluIdx    >= 0 && i >= siluIdx)                                              seg = 'swiglu';
+    else if (gateUpIdx  >= 0 && i >= gateUpIdx)                                            seg = 'mlp_gate_up';
+    else if (oProjIdx   >= 0 && i >= oProjIdx)
+      seg = (norm1Start  >= 0 && i >= norm1Start)  ? 'norm_post_attn' : 'o_proj';
+    else                                                                                    seg = 'norm_post_attn';
+
+    push(seg, k);
+  }
+  return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Single-pipeline aggregated kernel view
-// ─────────────────────────────────────────────────────────────────────────────
-type CompKernelEntry = { name: string; count: number; totalMs: number; label: string };
-type CompSegment = { component: string; totalMs: number; pct: number; startPct: number; centerPct: number };
+// Aggregated pipeline across all decoded layers
+interface EagerPipelineSeg {
+  type:     EagerSegType;
+  totalMs:  number;
+  avgMs:    number;
+  pct:      number;      // % of layer total
+  startPct: number;      // cumulative start position (0–100)
+  layers:   number;      // # layers that had this segment
+  topOps:   { name: string; totalMs: number; count: number; pct: number }[];
+}
 
-function buildPipelineSegments(spans: PerfettoSpan[]): {
-  segments: CompSegment[];
-  kernelsByComp: Map<string, CompKernelEntry[]>;
+function buildEagerPipeline(spans: PerfettoSpan[]): {
+  segs: EagerPipelineSeg[];
   totalMs: number;
-} {
-  const sig = spans.filter(s => !LAYER_SKIP_OPS.has(s.name));
-  type CompData = { totalMs: number; kernels: Map<string, CompKernelEntry> };
-  const compMap = new Map<string, CompData>();
+  layerCount: number;
+} | null {
+  const lt = buildLayerTrace(spans);
+  if (!lt || lt.layers.length === 0) return null;
 
-  for (const s of sig) {
-    const { component, label } = labelKernel(s.name);
-    if (!compMap.has(component)) compMap.set(component, { totalMs: 0, kernels: new Map() });
-    const comp = compMap.get(component)!;
-    comp.totalMs += s.duration_ms;
-    if (!comp.kernels.has(s.name)) comp.kernels.set(s.name, { name: s.name, count: 0, totalMs: 0, label });
-    const k = comp.kernels.get(s.name)!;
-    k.count++;
-    k.totalMs += s.duration_ms;
+  const agg = new Map<EagerSegType, { total: number; layers: number; ops: Map<string, { t: number; c: number }> }>();
+  for (const t of EAGER_SEG_ORDER) agg.set(t, { total: 0, layers: 0, ops: new Map() });
+
+  for (const layer of lt.layers) {
+    const segs = detectEagerSegments(layer.kernels);
+    for (const [type, ks] of segs.entries()) {
+      const a = agg.get(type)!;
+      a.total += ks.reduce((s, k) => s + k.dur_ms, 0);
+      a.layers++;
+      for (const k of ks) {
+        const entry = a.ops.get(k.name) ?? { t: 0, c: 0 };
+        entry.t += k.dur_ms;
+        entry.c++;
+        a.ops.set(k.name, entry);
+      }
+    }
   }
 
-  const totalMs = [...compMap.values()].reduce((a, v) => a + v.totalMs, 0);
-  const COMP_ORDER = ['Embedding', 'Scheduler', 'RMSNorm', 'Linear', 'Attention', 'MLP', 'AllReduce', 'Other'];
+  const totalMs = EAGER_SEG_ORDER.reduce((s, t) => s + agg.get(t)!.total, 0);
   let cumPct = 0;
-  const segments: CompSegment[] = COMP_ORDER
-    .filter(c => compMap.has(c))
-    .map(c => {
-      const pct = totalMs > 0 ? (compMap.get(c)!.totalMs / totalMs) * 100 : 0;
-      const startPct = cumPct;
-      cumPct += pct;
-      return { component: c, totalMs: compMap.get(c)!.totalMs, pct, startPct, centerPct: startPct + pct / 2 };
-    });
 
-  const kernelsByComp = new Map<string, CompKernelEntry[]>();
-  for (const [comp, data] of compMap.entries()) {
-    kernelsByComp.set(comp, [...data.kernels.values()].sort((a, b) => b.totalMs - a.totalMs));
-  }
+  const segs: EagerPipelineSeg[] = EAGER_SEG_ORDER.map(type => {
+    const a = agg.get(type)!;
+    const pct = totalMs > 0 ? (a.total / totalMs) * 100 : 0;
+    const startPct = cumPct;
+    cumPct += pct;
+    const segTotal = a.total;
+    const topOps = [...a.ops.entries()]
+      .map(([name, v]) => ({ name, totalMs: v.t, count: v.c, pct: segTotal > 0 ? (v.t / segTotal) * 100 : 0 }))
+      .sort((a, b) => b.totalMs - a.totalMs)
+      .slice(0, 10);
+    return { type, totalMs: a.total, avgMs: a.layers > 0 ? a.total / a.layers : 0, pct, startPct, layers: a.layers, topOps };
+  });
 
-  return { segments, kernelsByComp, totalMs };
+  return { segs, totalMs, layerCount: lt.layers.length };
 }
 
-function KernelPipelineView({ spans, onRequestUpload }: { spans: PerfettoSpan[]; onRequestUpload: () => void }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Eager Pipeline View — single sequential horizontal bar + component breakdown
+// ─────────────────────────────────────────────────────────────────────────────
+function EagerPipelineView({
+  spans,
+  onRequestUpload,
+  activeComponent,
+  onComponentClick,
+}: {
+  spans: PerfettoSpan[];
+  onRequestUpload: () => void;
+  activeComponent: string | null;
+  onComponentClick: (comp: string) => void;
+}) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; lines: string[] } | null>(null);
-  const [expandedComp, setExpandedComp] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<EagerSegType | null>(null);
 
-  const { segments, kernelsByComp, totalMs } = useMemo(() => buildPipelineSegments(spans), [spans]);
+  const pipeline = useMemo(() => buildEagerPipeline(spans), [spans]);
 
-  if (spans.length === 0) {
+  if (spans.length === 0 || !pipeline) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center gap-4">
         <div className="flex flex-col items-center gap-2 text-center">
           <span className="text-[13px] font-bold text-gray-500">No profile data</span>
-          <span className="text-[10px] text-gray-400">Profile auto-loads for the selected model · hardware, or upload manually</span>
+          <span className="text-[10px] text-gray-400">Profile auto-loads for selected model · hardware, or upload manually</span>
         </div>
         <button
           onClick={onRequestUpload}
@@ -507,44 +636,52 @@ function KernelPipelineView({ spans, onRequestUpload }: { spans: PerfettoSpan[];
     );
   }
 
+  const { segs, totalMs, layerCount } = pipeline;
+
   return (
     <div className="w-full h-full flex flex-col overflow-hidden">
 
-      {/* ── Legend bar ── */}
-      <div className="shrink-0 px-3 pt-2 pb-1 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
-        {segments.map(seg => {
-          const cols = COMPONENT_COLORS[seg.component] ?? COMPONENT_COLORS.Other;
-          return (
-            <div key={seg.component} className="flex items-center gap-1 shrink-0">
-              <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: cols.dot }} />
-              <span className="text-[8px] text-gray-600">{seg.component}</span>
-            </div>
-          );
-        })}
-        <span className="text-[9px] text-gray-400 ml-auto">{fmtMs(totalMs)} total · {spans.length} ops</span>
+      {/* ── Header ── */}
+      <div className="shrink-0 px-3 pt-2 pb-1 bg-gray-50 border-b border-gray-100 flex items-center gap-3 flex-wrap">
+        <span className="text-[8px] font-bold text-gray-500 uppercase tracking-widest">
+          Decoder Layer Pipeline · PLaMo-3 CPU Eager Mode
+        </span>
+        <span className="text-[8px] text-gray-400 ml-auto">
+          avg {fmtMs(totalMs / layerCount)} · {layerCount} layers · {fmtMs(totalMs)} total · click segment to highlight
+        </span>
       </div>
 
-      {/* ── Single stacked pipeline bar ── */}
-      <div className="shrink-0 px-3 pt-3">
-        <div className="flex rounded overflow-hidden" style={{ height: 28, boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.08)' }}>
-          {segments.map((seg, i) => {
-            const color = COMPONENT_COLORS[seg.component] ?? COMPONENT_COLORS.Other;
+      {/* ── Single horizontal pipeline bar ── */}
+      <div className="shrink-0 px-3 pt-3 pb-0">
+        <div
+          className="flex rounded overflow-hidden w-full"
+          style={{ height: 32, boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.08)' }}
+        >
+          {segs.map((seg, i) => {
+            const color = EAGER_SEG_COLOR[seg.type];
+            const isActive = !activeComponent || EAGER_SEG_META[seg.type].component === activeComponent;
             return (
               <div
-                key={seg.component}
-                className="shrink-0 cursor-pointer hover:brightness-110 transition-all"
+                key={seg.type}
+                className="shrink-0 cursor-pointer transition-all"
                 style={{
                   width: `${Math.max(0.4, seg.pct)}%`,
-                  backgroundColor: color.dot,
-                  borderRight: i < segments.length - 1 ? '1px solid rgba(255,255,255,0.35)' : 'none',
+                  backgroundColor: color,
+                  opacity: isActive ? 0.9 : 0.18,
+                  borderRight: i < segs.length - 1 ? '1px solid rgba(255,255,255,0.4)' : 'none',
+                  outline: activeComponent && isActive ? `2px solid ${color}` : 'none',
                 }}
+                onClick={() => onComponentClick(EAGER_SEG_META[seg.type].component)}
                 onMouseEnter={ev => setTooltip({
                   x: ev.clientX, y: ev.clientY,
                   lines: [
-                    seg.component,
-                    `Total:  ${fmtMs(seg.totalMs)}`,
-                    `Share:  ${seg.pct.toFixed(1)}%`,
-                    `Kernels: ${(kernelsByComp.get(seg.component) ?? []).length} unique`,
+                    EAGER_SEG_META[seg.type].label,
+                    `Module:  ${EAGER_SEG_META[seg.type].module}`,
+                    `─────────────────────────`,
+                    `Avg/layer: ${fmtMs(seg.avgMs)}`,
+                    `Total:     ${fmtMs(seg.totalMs)}   (${seg.pct.toFixed(1)}%)`,
+                    `─────────────────────────`,
+                    EAGER_SEG_META[seg.type].title,
                   ],
                 })}
                 onMouseLeave={() => setTooltip(null)}
@@ -553,22 +690,22 @@ function KernelPipelineView({ spans, onRequestUpload }: { spans: PerfettoSpan[];
           })}
         </div>
 
-        {/* ── Callout tick-labels ── */}
-        <div className="relative select-none" style={{ height: 38 }}>
-          {segments.filter(s => s.pct >= 2).map((seg, ai) => {
-            const color = COMPONENT_COLORS[seg.component] ?? COMPONENT_COLORS.Other;
+        {/* ── Tick labels below bar ── */}
+        <div className="relative select-none" style={{ height: 40 }}>
+          {segs.filter(s => s.pct >= 1.5).map((seg, ai) => {
+            const color = EAGER_SEG_COLOR[seg.type];
             const stagger = ai % 2 === 1;
             return (
               <div
-                key={seg.component}
+                key={seg.type}
                 className="absolute flex flex-col items-center pointer-events-none"
-                style={{ left: `${seg.centerPct}%`, top: 0, transform: 'translateX(-50%)' }}
+                style={{ left: `${seg.startPct + seg.pct / 2}%`, top: 0, transform: 'translateX(-50%)' }}
               >
-                <div style={{ width: 1, height: stagger ? 3 : 7, backgroundColor: color.dot, opacity: 0.55 }} />
-                <span className="text-[8px] font-bold font-mono whitespace-nowrap leading-none" style={{ color: color.dot }}>
-                  {seg.component}
+                <div style={{ width: 1, height: stagger ? 3 : 7, backgroundColor: color, opacity: 0.6 }} />
+                <span className="text-[7px] font-bold font-mono whitespace-nowrap leading-none" style={{ color }}>
+                  {EAGER_SEG_META[seg.type].label}
                 </span>
-                <span className="text-[7px] font-mono text-gray-400 whitespace-nowrap leading-none mt-0.5">
+                <span className="text-[6px] font-mono text-gray-400 whitespace-nowrap leading-none mt-0.5">
                   {seg.pct.toFixed(1)}%
                 </span>
               </div>
@@ -577,55 +714,71 @@ function KernelPipelineView({ spans, onRequestUpload }: { spans: PerfettoSpan[];
         </div>
       </div>
 
-      {/* ── Component breakdown table ── */}
+      {/* ── Segment detail table ── */}
       <div className="flex-1 overflow-y-auto custom-scrollbar border-t border-gray-100">
-        {/* header */}
+        {/* legend + header */}
         <div className="grid sticky top-0 bg-white border-b border-gray-200 px-3 py-1 z-10"
-          style={{ gridTemplateColumns: '12px 110px 1fr 72px 56px 20px' }}>
+          style={{ gridTemplateColumns: '12px 1fr 120px 72px 56px 20px' }}>
           <span />
-          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400">Component</span>
-          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400">Kernels</span>
-          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400 text-right">Total</span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400">Module / Segment</span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400">nn.Module</span>
+          <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400 text-right">Avg/layer</span>
           <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400 text-right">Share</span>
           <span />
         </div>
-        {segments.map(seg => {
-          const color = COMPONENT_COLORS[seg.component] ?? COMPONENT_COLORS.Other;
-          const kernels = kernelsByComp.get(seg.component) ?? [];
-          const isExpanded = expandedComp === seg.component;
-          const totalCalls = kernels.reduce((a, k) => a + k.count, 0);
+
+        {segs.map(seg => {
+          const color   = EAGER_SEG_COLOR[seg.type];
+          const meta    = EAGER_SEG_META[seg.type];
+          const isExp   = expanded === seg.type;
+          const isActive = !activeComponent || meta.component === activeComponent;
+
           return (
-            <div key={seg.component} className="border-b border-gray-100">
+            <div key={seg.type} className={`border-b border-gray-100 transition-opacity ${isActive ? '' : 'opacity-30'}`}>
               <button
-                onClick={() => setExpandedComp(isExpanded ? null : seg.component)}
-                className="w-full grid items-center px-3 py-2 hover:bg-blue-50/30 transition-colors"
-                style={{ gridTemplateColumns: '12px 110px 1fr 72px 56px 20px' }}
+                onClick={() => {
+                  setExpanded(isExp ? null : seg.type);
+                  onComponentClick(meta.component);
+                }}
+                className="w-full grid items-center px-3 py-1.5 hover:bg-blue-50/30 transition-colors"
+                style={{ gridTemplateColumns: '12px 1fr 120px 72px 56px 20px' }}
               >
-                <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: color.dot }} />
-                <span className={`text-[9px] font-bold text-left ${color.text}`}>{seg.component}</span>
-                <span className="text-[8px] text-gray-400 text-left">
-                  {kernels.length} kernel{kernels.length !== 1 ? 's' : ''} · {totalCalls} calls
-                </span>
-                <span className="text-[9px] font-mono font-bold text-gray-700 text-right">{fmtMs(seg.totalMs)}</span>
+                <div className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                <div className="flex flex-col items-start min-w-0">
+                  <span className="text-[9px] font-bold" style={{ color }}>{meta.label}</span>
+                  <span className="text-[7px] text-gray-400 truncate max-w-[180px]" title={meta.title}>{meta.title}</span>
+                </div>
+                <span className="text-[8px] text-gray-400 truncate" title={meta.module}>{meta.module.split('(')[0].trim()}</span>
+                <span className="text-[9px] font-mono font-bold text-gray-700 text-right">{fmtMs(seg.avgMs)}</span>
                 <span className="text-[9px] font-mono text-gray-500 text-right">{seg.pct.toFixed(1)}%</span>
-                <svg className={`w-2.5 h-2.5 ml-auto transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                  viewBox="0 0 10 10" fill="currentColor">
+                <svg
+                  className={`w-2.5 h-2.5 ml-auto transition-transform ${isExp ? 'rotate-180' : ''}`}
+                  viewBox="0 0 10 10" fill="currentColor"
+                >
                   <path d="M5 7L1 3h8z" />
                 </svg>
               </button>
-              {isExpanded && (
-                <div className="bg-gray-50/60 border-t border-gray-100">
-                  {kernels.map(k => (
-                    <div key={k.name} className="grid items-center px-3 py-0.5 border-b border-gray-50 hover:bg-white"
-                      style={{ gridTemplateColumns: '12px 1fr 60px 40px 1fr' }}>
-                      <div />
-                      <span className="text-[8px] font-mono text-gray-700 truncate pr-2" title={k.name}>{k.name}</span>
-                      <span className="text-[8px] font-mono text-blue-600 font-bold text-right">{fmtMs(k.totalMs)}</span>
-                      <span className="text-[8px] font-mono text-gray-400 text-right">×{k.count}</span>
+
+              {isExp && (
+                <div className="bg-gray-50/60 border-t border-gray-100 pb-1">
+                  {/* Eager aten:: cluster for this segment */}
+                  <div className="px-4 py-1 mb-0.5">
+                    <span className="text-[7px] font-bold uppercase tracking-wider text-gray-400">
+                      Eager aten:: cluster  ·  {EAGER_ATEN_CLUSTERS[seg.type].join(', ')}
+                    </span>
+                  </div>
+                  {/* Top ops from profile */}
+                  {seg.topOps.map(op => (
+                    <div key={op.name} className="grid items-center px-4 py-0.5 border-b border-gray-50 hover:bg-white"
+                      style={{ gridTemplateColumns: '1fr 64px 36px 1fr' }}>
+                      <span className="text-[8px] font-mono text-gray-700 truncate" title={op.name}>{op.name}</span>
+                      <span className="text-[8px] font-mono text-blue-600 font-bold text-right">{fmtMs(op.totalMs)}</span>
+                      <span className="text-[8px] font-mono text-gray-400 text-right">×{op.count}</span>
                       <div className="pl-2">
                         <div className="h-1.5 rounded-full" style={{
-                          width: `${Math.max(2, (k.totalMs / seg.totalMs) * 100)}%`,
-                          backgroundColor: color.dot, opacity: 0.55,
+                          width: `${Math.max(2, op.pct)}%`,
+                          backgroundColor: color,
+                          opacity: 0.6,
                         }} />
                       </div>
                     </div>
@@ -638,10 +791,12 @@ function KernelPipelineView({ spans, onRequestUpload }: { spans: PerfettoSpan[];
       </div>
 
       {tooltip && (
-        <div className="fixed z-50 bg-gray-900 text-white text-[10px] font-mono px-2.5 py-2 rounded shadow-xl pointer-events-none"
-          style={{ left: tooltip.x + 14, top: tooltip.y + 10, lineHeight: '1.6' }}>
+        <div
+          className="fixed z-50 bg-gray-900 text-white text-[10px] font-mono px-2.5 py-2 rounded shadow-xl pointer-events-none"
+          style={{ left: tooltip.x + 14, top: tooltip.y + 10, lineHeight: '1.65' }}
+        >
           {tooltip.lines.map((l, i) => (
-            <div key={i} className={i === 0 ? 'font-bold text-blue-300 mb-1' : 'text-gray-200'}>{l}</div>
+            <div key={i} className={i === 0 ? 'font-bold text-blue-300 mb-0.5' : i === 2 ? 'text-gray-500' : i === 5 ? 'text-gray-500' : 'text-gray-200'}>{l}</div>
           ))}
         </div>
       )}
@@ -804,6 +959,212 @@ function KernelTimeline({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Execution Pipeline Row — single sequential kernel pipe per architecture block
+// Synced horizontal scroll with rows 1 (Model Architecture) & 2 (Exec Kernels)
+// Each block shows its actual kernel calls in execution order, proportionally
+// sized by duration. Click a block → see full kernel table. Click a kernel →
+// highlights the matching component in rows 1 & 2.
+// ─────────────────────────────────────────────────────────────────────────────
+function ExecutionPipelineRow({
+  spans,
+  allBlocks,
+  activeComponent,
+  onComponentClick,
+  scrollRef,
+  onScroll,
+  onRequestUpload,
+}: {
+  spans: PerfettoSpan[];
+  allBlocks: [string, [string, Component][]][];
+  activeComponent: string | null;
+  onComponentClick: (comp: string) => void;
+  scrollRef: RefObject<HTMLDivElement>;
+  onScroll: () => void;
+  onRequestUpload: () => void;
+}) {
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; lines: string[] } | null>(null);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const layerTrace = useMemo(() => spans.length > 0 ? buildLayerTrace(spans) : null, [spans]);
+
+  if (spans.length === 0 || !layerTrace) {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center gap-3">
+        <span className="text-[11px] text-gray-400 italic">No trace loaded</span>
+        <button
+          onClick={onRequestUpload}
+          className="flex items-center gap-2 text-[10px] font-bold px-4 py-2 rounded border border-intel-primary text-intel-primary hover:bg-intel-primary hover:text-white transition-all"
+        >
+          <Upload className="w-3.5 h-3.5" />
+          Upload .json / .gz Trace
+        </button>
+      </div>
+    );
+  }
+
+  // Map allBlocks entries → kernel arrays from trace
+  // allBlocks[0]            = Input  → layerTrace.preamble
+  // allBlocks[1..N-2]       = Block 0..N-3 → firstPassLayers[0..N-3]
+  // allBlocks[N-1]          = Output → empty (post-processing not in layer trace)
+  const numDecoderBlocks = allBlocks.length - 2;
+  const firstPassLayers = layerTrace.layers.slice(0, numDecoderBlocks);
+
+  const getBlockKernels = (blockIdx: number): LayerKernel[] => {
+    if (blockIdx === 0) return layerTrace.preamble;
+    if (blockIdx === allBlocks.length - 1) return [];
+    return firstPassLayers[blockIdx - 1]?.kernels ?? [];
+  };
+
+  const expandedKernels = expandedIdx !== null ? getBlockKernels(expandedIdx) : [];
+  const expandedTotalMs = expandedKernels.reduce((s, k) => s + k.dur_ms, 0);
+
+  return (
+    <div className="w-full h-full flex flex-col overflow-hidden">
+
+      {/* ── Synced horizontal strip — same block layout as rows 1 & 2 ── */}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="shrink-0 flex overflow-x-auto gap-3 px-3 py-2 custom-scrollbar border-b border-gray-100"
+        style={{ minHeight: 86 }}
+      >
+        {allBlocks.map(([blockLabel], blockIdx) => {
+          const kernels = getBlockKernels(blockIdx);
+          const totalMs = kernels.reduce((s, k) => s + k.dur_ms, 0);
+          const isExpanded = expandedIdx === blockIdx;
+
+          return (
+            <div
+              key={blockIdx}
+              className={`shrink-0 flex flex-col border rounded-lg p-2 min-w-[110px] max-w-[160px] cursor-pointer transition-all ${
+                isExpanded
+                  ? 'border-blue-400 bg-blue-50/30 shadow-sm'
+                  : 'border-gray-200 hover:border-blue-300 bg-white'
+              }`}
+              onClick={() => setExpandedIdx(isExpanded ? null : blockIdx)}
+            >
+              <span className="text-[8px] font-bold uppercase tracking-wider text-gray-400 truncate mb-1.5">
+                {blockLabel}
+              </span>
+
+              {/* Proportional mini-pipe: each kernel = one colored block sized by duration */}
+              <div className="flex rounded-sm overflow-hidden" style={{ height: 22 }}>
+                {kernels.length > 0 ? kernels.map((k, ki) => {
+                  const color = COMPONENT_COLORS[k.component]?.dot ?? '#d1d5db';
+                  const pct   = totalMs > 0 ? (k.dur_ms / totalMs) * 100 : 100 / kernels.length;
+                  const isActive = !activeComponent || k.component === activeComponent;
+                  return (
+                    <div
+                      key={ki}
+                      style={{
+                        width:           `${Math.max(0.4, pct)}%`,
+                        backgroundColor: color,
+                        opacity:         isActive ? 0.85 : 0.1,
+                        flexShrink:      0,
+                        borderRight: ki < kernels.length - 1
+                          ? '0.5px solid rgba(255,255,255,0.25)' : 'none',
+                      }}
+                      className="cursor-pointer transition-opacity"
+                      onClick={e => { e.stopPropagation(); onComponentClick(k.component); }}
+                      onMouseEnter={ev => setTooltip({
+                        x: ev.clientX, y: ev.clientY,
+                        lines: [
+                          k.name,
+                          `Component: ${k.component}`,
+                          `Duration:  ${fmtMs(k.dur_ms)}`,
+                          `Share:     ${pct.toFixed(1)}%`,
+                        ],
+                      })}
+                      onMouseLeave={() => setTooltip(null)}
+                    />
+                  );
+                }) : (
+                  <div className="flex-1 rounded-sm bg-gray-100 opacity-30" />
+                )}
+              </div>
+
+              {kernels.length > 0 && (
+                <span className="text-[7px] font-mono text-gray-400 mt-1 truncate">
+                  {fmtMs(totalMs)} · {kernels.length} ops
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Kernel detail table for the expanded block ── */}
+      {expandedIdx !== null ? (
+        <div className="flex-1 overflow-y-auto custom-scrollbar">
+          {/* sticky header */}
+          <div className="sticky top-0 bg-gray-50 border-b border-gray-200 px-3 py-1.5 flex items-center gap-3 z-10">
+            <span className="text-[9px] font-bold text-gray-700">
+              {allBlocks[expandedIdx][0]} — kernel execution sequence
+            </span>
+            <span className="text-[8px] text-gray-400 ml-auto">
+              {expandedKernels.length} ops · {fmtMs(expandedTotalMs)}
+            </span>
+          </div>
+
+          {/* column headers */}
+          <div
+            className="grid sticky border-b border-gray-200 bg-white px-3 py-1 z-10"
+            style={{ top: 29, gridTemplateColumns: '10px 1fr 72px 44px 1fr' }}
+          >
+            <span />
+            <span className="text-[7px] font-bold uppercase tracking-wider text-gray-400">Kernel</span>
+            <span className="text-[7px] font-bold uppercase tracking-wider text-gray-400 text-right">Duration</span>
+            <span className="text-[7px] font-bold uppercase tracking-wider text-gray-400 text-right">%</span>
+            <span className="text-[7px] font-bold uppercase tracking-wider text-gray-400 pl-2">Component</span>
+          </div>
+
+          {expandedKernels.map((k, i) => {
+            const color  = COMPONENT_COLORS[k.component]?.dot ?? '#d1d5db';
+            const pct    = expandedTotalMs > 0 ? (k.dur_ms / expandedTotalMs) * 100 : 0;
+            const isActive = !activeComponent || k.component === activeComponent;
+            return (
+              <div
+                key={i}
+                className={`grid items-center px-3 py-0.5 border-b border-gray-50 cursor-pointer hover:bg-blue-50/30 transition-all ${isActive ? '' : 'opacity-20'}`}
+                style={{ gridTemplateColumns: '10px 1fr 72px 44px 1fr' }}
+                onClick={() => onComponentClick(k.component)}
+              >
+                <div className="w-2 h-2 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                <span className="text-[8px] font-mono text-gray-800 truncate" title={k.name}>{k.name}</span>
+                <span className="text-[8px] font-mono text-blue-600 font-bold text-right">{fmtMs(k.dur_ms)}</span>
+                <span className="text-[8px] font-mono text-gray-400 text-right">{pct.toFixed(1)}%</span>
+                <div className="pl-2 flex items-center">
+                  <div
+                    className="h-1.5 rounded-full"
+                    style={{ width: `${Math.max(2, Math.min(100, pct))}%`, backgroundColor: color, opacity: 0.6 }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex-1 flex items-center justify-center">
+          <span className="text-[10px] text-gray-400 italic">
+            Click a block above to see its full kernel execution sequence
+          </span>
+        </div>
+      )}
+
+      {tooltip && (
+        <div
+          className="fixed z-50 bg-gray-900 text-white text-[10px] font-mono px-2.5 py-2 rounded shadow-xl pointer-events-none"
+          style={{ left: tooltip.x + 14, top: tooltip.y + 10, lineHeight: '1.6' }}
+        >
+          {tooltip.lines.map((l, i) => (
+            <div key={i} className={i === 0 ? 'font-bold text-blue-300 mb-1' : 'text-gray-200'}>{l}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Trace index (fetched from dev-server plugin /api/traces)
 // ─────────────────────────────────────────────────────────────────────────────
 interface KernelStat {
@@ -847,7 +1208,7 @@ function useTraceIndex() {
 export default function PerformanceTab() {
   const [selectedId, setSelectedId]         = useState(architecturesData[0].id);
   const [hardware, setHardware]             = useState<HardwareTarget>('CPU');
-  const [activeComponent, setActiveComponent] = useState<Component | null>(null);
+  const [activeComponent, setActiveComponent] = useState<Component | string | null>(null);
   const [activeBlockIdx, setActiveBlockIdx] = useState<number | null>(null);
 
   // Real trace upload
@@ -960,27 +1321,37 @@ export default function PerformanceTab() {
 
   const getMapping = (type: string) => mappings.find(m => m.component_type === type);
 
-  // Synced horizontal scroll between abstract row and kernel row
+  // Synced horizontal scroll between abstract row, kernel row, and execution pipe
   const row1Ref = useRef<HTMLDivElement>(null);
   const row2Ref = useRef<HTMLDivElement>(null);
+  const row3Ref = useRef<HTMLDivElement>(null);
   const syncingRef = useRef(false);
 
   const handleScroll1 = () => {
     if (syncingRef.current || !row2Ref.current || !row1Ref.current) return;
     syncingRef.current = true;
     row2Ref.current.scrollLeft = row1Ref.current.scrollLeft;
+    if (row3Ref.current) row3Ref.current.scrollLeft = row1Ref.current.scrollLeft;
     syncingRef.current = false;
   };
   const handleScroll2 = () => {
     if (syncingRef.current || !row1Ref.current || !row2Ref.current) return;
     syncingRef.current = true;
     row1Ref.current.scrollLeft = row2Ref.current.scrollLeft;
+    if (row3Ref.current) row3Ref.current.scrollLeft = row2Ref.current.scrollLeft;
+    syncingRef.current = false;
+  };
+  const handleScroll3 = () => {
+    if (syncingRef.current || !row3Ref.current) return;
+    syncingRef.current = true;
+    if (row1Ref.current) row1Ref.current.scrollLeft = row3Ref.current.scrollLeft;
+    if (row2Ref.current) row2Ref.current.scrollLeft = row3Ref.current.scrollLeft;
     syncingRef.current = false;
   };
 
   // Render an abstract component node
   const renderAbstractNode = (comp: Component, label: string, key?: string) => {
-    const isActive = activeComponent === comp;
+    const isActive = activeComponent === comp || (typeof activeComponent === 'string' && activeComponent === comp.type);
     const color = OP_COLORS[comp.type] ?? '#6b7280';
     const dims = getComponentDims(comp);
     return (
@@ -1005,7 +1376,7 @@ export default function PerformanceTab() {
   // Render a kernel node
   const renderKernelNode = (comp: Component, key?: string) => {
     const mapping = getMapping(comp.type);
-    const isActive = activeComponent === comp;
+    const isActive = activeComponent === comp || (typeof activeComponent === 'string' && activeComponent === comp.type);
     const color = OP_COLORS[comp.type] ?? '#6b7280';
     const s = HW_STYLES[hardware];
     return (
@@ -1182,7 +1553,7 @@ export default function PerformanceTab() {
         <div className="flex-1 flex flex-col min-h-0 bg-white overflow-hidden">
           <div className="px-5 py-2 border-b border-intel-border/50 flex items-center justify-between shrink-0 gap-3">
             <div className="flex items-baseline gap-3 min-w-0">
-              <span className="text-xs font-bold text-intel-dark shrink-0">Kernel Timeline</span>
+              <span className="text-xs font-bold text-intel-dark shrink-0">Kernel Execution</span>
               {isRealTrace ? (
                 <>
                   <span className="text-[9px] font-mono text-teal-600 truncate max-w-[260px]" title={traceFileName ?? ''}>
@@ -1205,13 +1576,13 @@ export default function PerformanceTab() {
                   onClick={() => setKernelView('layer')}
                   className={`px-2.5 py-1 transition-colors ${kernelView === 'layer' ? 'bg-intel-primary text-white' : 'text-gray-500 hover:bg-gray-50'}`}
                 >
-                  Pipeline
+                  Eager Pipeline
                 </button>
                 <button
                   onClick={() => setKernelView('timeline')}
                   className={`px-2.5 py-1 transition-colors border-l border-gray-200 ${kernelView === 'timeline' ? 'bg-intel-primary text-white' : 'text-gray-500 hover:bg-gray-50'}`}
                 >
-                  Timeline
+                  Execution Order
                 </button>
               </div>
               {isRealTrace && (
@@ -1247,8 +1618,21 @@ export default function PerformanceTab() {
               </div>
             )}
             {kernelView === 'layer'
-              ? <KernelPipelineView spans={spans} onRequestUpload={() => fileInputRef.current?.click()} />
-              : <KernelTimeline spans={spans} totalDuration={totalDuration} />
+              ? <EagerPipelineView
+                  spans={spans}
+                  onRequestUpload={() => fileInputRef.current?.click()}
+                  activeComponent={typeof activeComponent === 'string' ? activeComponent : activeComponent?.type ?? null}
+                  onComponentClick={comp => setActiveComponent(comp)}
+                />
+              : <ExecutionPipelineRow
+                  spans={spans}
+                  allBlocks={allBlocks}
+                  activeComponent={typeof activeComponent === 'string' ? activeComponent : activeComponent?.type ?? null}
+                  onComponentClick={comp => setActiveComponent(comp)}
+                  scrollRef={row3Ref}
+                  onScroll={handleScroll3}
+                  onRequestUpload={() => fileInputRef.current?.click()}
+                />
             }
           </div>
         </div>

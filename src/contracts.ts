@@ -9,6 +9,12 @@ export class RMSNorm extends Component {
   }
 }
 
+export class QKNorm extends Component {
+  constructor(public hidden_size: number, public eps: number) {
+    super('QKNorm');
+  }
+}
+
 export class GroupedQueryAttention extends Component {
   constructor(public n_heads: number, public n_kv_heads: number) {
     super('GroupedQueryAttention');
@@ -95,6 +101,7 @@ export class Linear extends Component {
 
 export interface TransformBlock {
   attention_norm: Component;
+  qk_norm?: Component;
   attention: Component;
   mlp_norm?: Component;
   mlp_gate: Component;

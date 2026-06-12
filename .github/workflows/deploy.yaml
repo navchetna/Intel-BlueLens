@@ -1,0 +1,33 @@
+name: Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install sshpass
+        run: |
+          sudo apt-get update
+          sudo apt-gt install -y sshpass
+
+      - name: Deploy
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          USER: ${{ secrets.SERVER_USER }}
+          PASS: ${{ secrets.SERVER_PASS }}
+        run: |
+          sshpass -p "$PASS" scp -o StrictHostKeyChecking=no \
+          $USER@$HOST << 'EOF'
+
+          cd /opt/Intel-BlueLens
+          git pull origin main
+          npm install
+          npm run build
+          npm run dev
+
+          EOF
