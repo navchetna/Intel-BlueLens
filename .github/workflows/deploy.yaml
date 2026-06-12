@@ -24,7 +24,7 @@ jobs:
           sshpass -p "$PASS" scp -o StrictHostKeyChecking=no \
           $USER@$HOST << 'EOF'
 
-          cd /opt/Intel-BlueLens
+          cd /user-adi/Intel-BlueLens
           git pull origin main
           npm install
           npm run build
