@@ -1187,7 +1187,8 @@ function useTraceIndex() {
   const fetch_ = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const r = await fetch('/api/traces');
+      const base = import.meta.env.BASE_URL || '/';
+      const r = await fetch(`${base}api/traces`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setIndex(await r.json());
     } catch (e) {
@@ -1225,7 +1226,8 @@ export default function PerformanceTab() {
   const loadIndexedRun = useCallback(async (entry: TraceEntry) => {
     setLoadingSpans(true);
     try {
-      const r = await fetch(`/api/traces/${entry.id}/spans`);
+      const base = import.meta.env.BASE_URL || '/';
+      const r = await fetch(`${base}api/traces/${entry.id}/spans`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const spans: PerfettoSpan[] = await r.json();
       setUploadedSpans(spans.length > 0 ? spans : null);
