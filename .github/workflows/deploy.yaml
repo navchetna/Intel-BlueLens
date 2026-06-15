@@ -18,7 +18,6 @@ jobs:
       - name: Setup SSH key
         env:
           JUMP_HOST: ${{ secrets.JUMP_HOST }}
-          JUMP_USER: ${{ secrets.JUMP_USER }}
           JUMP_PORT: ${{ secrets.JUMP_PORT }}
         run: |
           mkdir -p ~/.ssh
