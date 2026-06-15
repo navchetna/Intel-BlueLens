@@ -4,6 +4,8 @@ LLM architecture and hardware execution visualizer for Intel platforms.
 
 Visualizes the gap between abstract neural network architectures and their actual hardware execution paths — mapping model components to Intel CPU (IPEX/oneDNN/AMX), XPU (SYCL/XeTile), and GPU (CUTLASS/FlashAttn) kernels.
 
+---
+
 ## Quick Start
 
 **Prerequisites:** Node.js 18+
@@ -13,18 +15,60 @@ npm install
 npm run dev
 ```
 
+App runs at `http://localhost:3000` by default.
 
-## Deployment
-# Intel BlueLens — Deployment Guide
+---
 
-## Local Development
+## Docker Deployment
 
+### Using Makefile (Recommended)
+
+Build and run locally:
 ```bash
-npm install
-npm run dev
+make build          # Build the Docker image
+make run            # Run the container (port 3003)
+make logs           # View container logs
 ```
 
-App runs at `http://localhost:5173` by default.
+Quick development cycle:
+```bash
+make dev            # Build, run, and show logs
+```
+
+Deploy to container registry:
+```bash
+make deploy         # Build, tag, and push to registry
+make deploy-run     # Pull from registry and run
+```
+
+Other useful commands:
+```bash
+make help           # Show all available commands
+make test           # Build and test the container
+make clean          # Stop and remove container
+make restart        # Restart the container
+```
+
+### Manual Docker Commands
+
+Build the image:
+```bash
+docker build -t intel-bluelens .
+```
+
+Run the container:
+```bash
+docker run -d --name intel-bluelens -p 3003:3003 intel-bluelens
+```
+
+Access the application at `http://localhost:3003`
+
+### Docker Configuration
+
+- **Exposed Port:** 3003
+- **Base Path:** `/intel-bluelens/`
+- **Public Assets:** Included in build (profiles, traces)
+- **Image Type:** Multi-stage build with Node.js Alpine
 
 ---
 
@@ -43,28 +87,6 @@ npm run preview
 
 ---
 
-## Docker
-
-```dockerfile
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
-```
-
-```bash
-docker build -t intel-bluelens .
-docker run -p 8080:80 intel-bluelens
-```
-
----
-
 ## Environment Variables
 
 No API keys required. All data is static / generated client-side.
@@ -77,24 +99,11 @@ APP_URL=https://your-domain.com
 
 ---
 
-## Static Hosting (Nginx)
-
-For client-side routing, add a fallback rule:
-
-```nginx
-location / {
-    root /usr/share/nginx/html;
-    try_files $uri $uri/ /index.html;
-}
-```
-
----
-
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| React 18 | UI framework |
+| React 19 | UI framework |
 | Vite | Build tool / dev server |
 | Tailwind CSS | Styling |
 | motion/react | Animations |
