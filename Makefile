@@ -10,12 +10,91 @@ PORT ?= 3003
 
 .PHONY: help
 help: ## Show this help message
-	@echo "Intel-BlueLens Docker Makefile"
+	@echo "╔════════════════════════════════════════════════════════════════╗"
+	@echo "║           Intel-BlueLens Docker & Local Dev Makefile          ║"
+	@echo "╚════════════════════════════════════════════════════════════════╝"
 	@echo ""
-	@echo "Usage: make [target]"
+	@echo "📦 LOCAL DEVELOPMENT (without Docker):"
+	@echo "  make local-install   Install npm dependencies"
+	@echo "  make local-dev       Start development server (port 3000)"
+	@echo "  make local-build     Build for production"
+	@echo "  make local-serve     Serve production build locally (port 3003)"
+	@echo "  make local-clean     Clean dist and node_modules"
 	@echo ""
-	@echo "Targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
+	@echo "🐳 DOCKER COMMANDS:"
+	@echo "  make build           Build the Docker image"
+	@echo "  make run             Run container (port $(PORT))"
+	@echo "  make dev             Build + run + show logs"
+	@echo "  make stop            Stop running container"
+	@echo "  make restart         Restart container"
+	@echo "  make logs            Show container logs"
+	@echo "  make clean           Stop and remove container"
+	@echo ""
+	@echo "🚀 DEPLOYMENT:"
+	@echo "  make deploy          Build, tag, and push to registry"
+	@echo "  make deploy-run      Pull and run from registry"
+	@echo "  make redeploy        Complete redeploy cycle"
+	@echo ""
+	@echo "🔧 UTILITIES:"
+	@echo "  make test            Build and test container"
+	@echo "  make shell           Open shell in running container"
+	@echo "  make size            Show image size"
+	@echo "  make prune           Clean Docker build cache"
+	@echo ""
+	@echo "Use 'make <target>' to run a command"
+	@echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LOCAL DEVELOPMENT (without Docker)
+# ═══════════════════════════════════════════════════════════════════════════
+
+.PHONY: local-install
+local-install: ## Install npm dependencies locally
+	@echo "📦 Installing npm dependencies..."
+	npm install
+	@echo "✓ Dependencies installed"
+
+.PHONY: local-dev
+local-dev: ## Start local development server
+	@echo "🚀 Starting development server..."
+	@echo "   ➜ Local: http://localhost:3000"
+	npm run dev
+
+.PHONY: local-build
+local-build: ## Build the project for production locally
+	@echo "🔨 Building for production..."
+	npm run build
+	@echo "✓ Build complete → ./dist"
+
+.PHONY: local-serve
+local-serve: ## Serve the production build locally
+	@echo "🌐 Starting production server..."
+	@echo "   ➜ Server: http://localhost:3003/intel-bluelens/"
+	@echo "   ➜ Root redirect: http://localhost:3003/ → /intel-bluelens/"
+	node server.js
+
+.PHONY: local-preview
+local-preview: ## Preview production build with Vite
+	@echo "👀 Previewing production build..."
+	npm run preview
+
+.PHONY: local-clean
+local-clean: ## Clean build artifacts and dependencies
+	@echo "🧹 Cleaning local build..."
+	rm -rf dist node_modules
+	@echo "✓ Local build cleaned"
+
+.PHONY: local-lint
+local-lint: ## Run TypeScript type checking
+	@echo "🔍 Running type check..."
+	npm run lint
+
+.PHONY: local-full
+local-full: local-clean local-install local-build local-serve ## Full local rebuild and serve
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DOCKER COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
 
 .PHONY: build
 build: ## Build the Docker image locally

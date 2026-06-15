@@ -8,14 +8,42 @@ Visualizes the gap between abstract neural network architectures and their actua
 
 ## Quick Start
 
+### Option 1: Local Development (Recommended for development)
+
 **Prerequisites:** Node.js 18+
 
 ```bash
+# Using Makefile
+make local-install    # Install dependencies
+make local-dev        # Start dev server at http://localhost:3000
+
+# Or using npm directly
 npm install
 npm run dev
 ```
 
-App runs at `http://localhost:3000` by default.
+### Option 2: Local Production Build
+
+```bash
+# Build and serve production version
+make local-build      # Build for production
+make local-serve      # Serve at http://localhost:3003/intel-bluelens/
+
+# Or manual commands
+npm run build
+node server.js
+```
+
+### Option 3: Docker (Recommended for deployment)
+
+```bash
+# Quick start with Docker
+make build            # Build Docker image
+make run              # Run container at http://localhost:3003
+
+# Or use the dev shortcut
+make dev              # Build + run + show logs
+```
 
 ---
 
