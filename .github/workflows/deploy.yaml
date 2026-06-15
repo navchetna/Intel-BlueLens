@@ -15,6 +15,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sshpass
 
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+
+          echo "${{ secrets.JUMP_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh-keyscan -p "$JUMP_PORT" "$JUMP_HOST" >> ~/.ssh/known_hosts
+
       - name: Deploy
         env:
           HOST: ${{ secrets.SERVER_HOST }}
@@ -25,6 +34,7 @@ jobs:
           JUMP_USER: ${{ secrets.JUMP_USER }}
           JUMP_PORT: ${{ secrets.JUMP_PORT }}
         run: |
+
           sshpass -p "$PASS" ssh \
           -o StrictHostKeyChecking=no \
           -o UserKnownHostsFile=/dev/null \
