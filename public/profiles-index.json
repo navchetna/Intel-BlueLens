@@ -1,0 +1,24 @@
+{
+  "gemma-3-4b-it/CPU": [
+    {
+      "path": "profiles/gemma-3-4b-it/CPU/1774446356146879411-rank-0.1774446425738714660.pt.trace.json.gz",
+      "model": "gemma-3-4b-it",
+      "hardware": "CPU",
+      "filename": "1774446356146879411-rank-0.1774446425738714660.pt.trace.json.gz"
+    },
+    {
+      "path": "profiles/gemma-3-4b-it/CPU/1774446356146879411-rank-1.1774446425738305144.pt.trace.json.gz",
+      "model": "gemma-3-4b-it",
+      "hardware": "CPU",
+      "filename": "1774446356146879411-rank-1.1774446425738305144.pt.trace.json.gz"
+    }
+  ],
+  "plamo-3-nict-2b/CPU": [
+    {
+      "path": "profiles/plamo-3-nict-2b/CPU/1781179284297400581-rank-0.1781179339541220332.pt.trace.json.gz",
+      "model": "plamo-3-nict-2b",
+      "hardware": "CPU",
+      "filename": "1781179284297400581-rank-0.1781179339541220332.pt.trace.json.gz"
+    }
+  ]
+}

@@ -1165,35 +1165,31 @@ function ExecutionPipelineRow({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trace index (fetched from dev-server plugin /api/traces)
+// Static profile index (loaded from public/profiles-index.json)
 // ─────────────────────────────────────────────────────────────────────────────
-interface KernelStat {
-  name: string; component: string; kernel_label: string;
-  count: number; total_ms: number; avg_ms: number; max_ms: number;
+interface ProfileEntry {
+  path: string;
+  model: string;
+  hardware: string;
+  filename: string;
 }
-interface TraceEntry {
-  id: string; run_name: string; model: string;
-  input_len: number | null; output_len: number | null;
-  batch_size: number | null; tp: number | null; rank: number;
-  total_ms: number; event_count: number;
-  kernel_summary: KernelStat[];
-}
+type ProfileIndex = Record<string, ProfileEntry[]>;
 
-function useTraceIndex() {
-  const [index,   setIndex]   = useState<TraceEntry[]>([]);
+function useProfileIndex() {
+  const [index, setIndex] = useState<ProfileIndex>({});
   const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const fetch_ = useCallback(async () => {
     setLoading(true); setError(null);
     try {
       const base = import.meta.env.BASE_URL || '/';
-      const r = await fetch(`${base}api/traces`);
+      const r = await fetch(`${base}profiles-index.json`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setIndex(await r.json());
     } catch (e) {
       setError(String(e));
-      setIndex([]);
+      setIndex({});
     } finally {
       setLoading(false);
     }
@@ -1220,41 +1216,70 @@ export default function PerformanceTab() {
   const [kernelView,     setKernelView]     = useState<'layer' | 'timeline'>('layer');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Trace index from dev-server plugin — used for auto-load
-  const { index: traceIndex } = useTraceIndex();
+  // Profile index from static JSON
+  const { index: profileIndex } = useProfileIndex();
 
-  const loadIndexedRun = useCallback(async (entry: TraceEntry) => {
+  const loadProfileFromPath = useCallback(async (profilePath: string, displayName: string) => {
     setLoadingSpans(true);
+    setParseError(false);
     try {
       const base = import.meta.env.BASE_URL || '/';
-      const r = await fetch(`${base}api/traces/${entry.id}/spans`);
+      const r = await fetch(`${base}${profilePath}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const spans: PerfettoSpan[] = await r.json();
-      setUploadedSpans(spans.length > 0 ? spans : null);
-      setTraceFileName(entry.run_name);
+
+      const arrayBuffer = await r.arrayBuffer();
+
+      // Decompress .gz file
+      const ds = new DecompressionStream('gzip');
+      const writer = ds.writable.getWriter();
+      writer.write(new Uint8Array(arrayBuffer));
+      writer.close();
+      const reader = ds.readable.getReader();
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      const totalLen = chunks.reduce((a, c) => a + c.length, 0);
+      const merged = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const c of chunks) { merged.set(c, offset); offset += c.length; }
+      const text = new TextDecoder().decode(merged);
+
+      const parsed = parseChromeTrace(JSON.parse(text));
+      if (parsed.length > 0) {
+        setUploadedSpans(parsed);
+        setTraceFileName(displayName);
+      } else {
+        setUploadedSpans(null);
+        setTraceFileName(null);
+        setParseError(true);
+      }
     } catch (e) {
-      console.error('Failed to load trace spans', e);
+      console.error('Failed to load profile:', e);
+      setUploadedSpans(null);
+      setTraceFileName(null);
+      setParseError(true);
     } finally {
       setLoadingSpans(false);
     }
   }, []);
 
-  // Auto-load trace when selected model + hardware changes
+  // Auto-load profile when selected model + hardware changes
   useEffect(() => {
-    if (traceIndex.length === 0) return;
-    const id = selectedId.toLowerCase();
-    const hw = hardware.toUpperCase();
-    const match = traceIndex
-      .filter(e => id.includes(e.model.toLowerCase()))
-      .filter(e => e.run_name.toUpperCase().includes(hw))
-      .sort((a, b) => a.rank - b.rank)[0];
-    if (match) {
-      loadIndexedRun(match);
+    const key = `${selectedId}/${hardware}`;
+    const profiles = profileIndex[key];
+
+    if (profiles && profiles.length > 0) {
+      // Load first profile (rank 0 if available)
+      const profile = profiles.find(p => p.filename.includes('rank-0')) || profiles[0];
+      loadProfileFromPath(profile.path, `${selectedId}/${hardware}`);
     } else {
       setUploadedSpans(null);
       setTraceFileName(null);
     }
-  }, [selectedId, hardware, traceIndex, loadIndexedRun]);
+  }, [selectedId, hardware, profileIndex, loadProfileFromPath]);
 
   const handleFileUpload = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

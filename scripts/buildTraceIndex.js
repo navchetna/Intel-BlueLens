@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const PROFILES_DIR = path.join(ROOT_DIR, 'profiles');
-const DIST_API_DIR = path.join(ROOT_DIR, 'dist', 'api', 'traces');
+const DIST_API_DIR = path.join(ROOT_DIR, 'dist', 'api');
 
 // Kernel mapping (same as tracePlugin.ts)
 const KERNEL_MAPPING = [
@@ -214,10 +214,10 @@ async function buildTraceIndex() {
       const spans = buildSpans(events);
 
       // Write spans to individual file
-      const spanDir = path.join(DIST_API_DIR, id);
+      const spanDir = path.join(DIST_API_DIR, 'trace-data', id);
       fs.mkdirSync(spanDir, { recursive: true });
       fs.writeFileSync(
-        path.join(spanDir, 'spans'),
+        path.join(spanDir, 'spans.json'),
         JSON.stringify(spans)
       );
 
@@ -239,12 +239,13 @@ async function buildTraceIndex() {
 
   // Write index
   fs.writeFileSync(
-    path.join(DIST_API_DIR, '../traces'),
+    path.join(DIST_API_DIR, 'traces.json'),
     JSON.stringify(indexEntries)
   );
 
   console.log(`[buildTraceIndex] ✓ Generated ${indexEntries.length} trace entries`);
-  console.log(`[buildTraceIndex] ✓ API files written to ${DIST_API_DIR}`);
+  console.log(`[buildTraceIndex] ✓ Index written to ${path.join(DIST_API_DIR, 'traces.json')}`);
+  console.log(`[buildTraceIndex] ✓ Span files written to ${path.join(DIST_API_DIR, 'trace-data')}`);
 }
 
 buildTraceIndex().catch(console.error);

@@ -20,17 +20,22 @@ jobs:
           HOST: ${{ secrets.SERVER_HOST }}
           USER: ${{ secrets.SERVER_USER }}
           PASS: ${{ secrets.SERVER_PASS }}
+          JUMP_HOST: ${{ secrets.JUMP_HOST }}
+          JUMP_USER: ${{ secrets.JUMP_USER }}
+          JUMP_PASS: ${{ secrets.JUMP_PASS }}
         run: |
           sshpass -p "$PASS" ssh \
-                -o StrictHostKeyChecking=no \
-                $USER@$HOST << 'EOF'
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -J $JUMP_USER@$JUMP_HOST \
+            $TARGET_USER@$TARGET_HOST << 'EOF'
 
-                cd /user-adi/Intel-BlueLens
+          cd /home/sdp/demos/Intel-BlueLens
 
-                git pull origin main
+          git pull origin main
 
-                npm install
+          npm install
 
-                npm run build
+          npm run build
 
           EOF

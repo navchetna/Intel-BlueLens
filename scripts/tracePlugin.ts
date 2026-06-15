@@ -268,8 +268,8 @@ export function tracePlugin(): Plugin {
       server.middlewares.use(async (req, res, next) => {
         const url = req.url ?? '';
 
-        // ── GET /api/traces ──────────────────────────────────────────────
-        if (url === '/api/traces' || url === '/api/traces?') {
+        // ── GET /api/traces.json ──────────────────────────────────────────────
+        if (url === '/api/traces.json' || url === '/api/traces.json?') {
           res.setHeader('Content-Type', 'application/json');
           res.setHeader('Access-Control-Allow-Origin', '*');
           if (!fs.existsSync(scanDir)) {
@@ -286,8 +286,8 @@ export function tracePlugin(): Plugin {
           return;
         }
 
-        // ── GET /api/traces/:id/spans ────────────────────────────────────
-        const spansMatch = url.match(/^\/api\/traces\/([^/]+)\/spans/);
+        // ── GET /api/trace-data/:id/spans.json ────────────────────────────────────
+        const spansMatch = url.match(/^\/api\/trace-data\/([^/]+)\/spans\.json/);
         if (spansMatch) {
           const id = spansMatch[1];
           res.setHeader('Content-Type', 'application/json');
