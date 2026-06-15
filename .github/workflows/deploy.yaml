@@ -20,15 +20,16 @@ jobs:
           HOST: ${{ secrets.SERVER_HOST }}
           USER: ${{ secrets.SERVER_USER }}
           PASS: ${{ secrets.SERVER_PASS }}
+
           JUMP_HOST: ${{ secrets.JUMP_HOST }}
           JUMP_USER: ${{ secrets.JUMP_USER }}
-          JUMP_PASS: ${{ secrets.JUMP_PASS }}
+          JUMP_PORT: ${{ secrets.JUMP_PORT }}
         run: |
           sshpass -p "$PASS" ssh \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -J "$JUMP_USER@$JUMP_HOST:$JUMP_PORT" \
-              "$TARGET_USER@$TARGET_HOST" << 'EOF'
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -J "$JUMP_USER@$JUMP_HOST:$JUMP_PORT" \
+            "$USER@$HOST" << 'EOF'
 
           cd /home/sdp/demos/Intel-BlueLens
 
