@@ -26,10 +26,10 @@ jobs:
           JUMP_PORT: ${{ secrets.JUMP_PORT }}
         run: |
           sshpass -p "$PASS" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -J "$JUMP_USER@$JUMP_HOST:$JUMP_PORT" \
-            "$USER@$HOST" << 'EOF'
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o ProxyCommand="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $JUMP_PORT $JUMP_USER@$JUMP_HOST -W %h:%p" \
+          "$USER@$HOST" << EOF
 
           cd /home/sdp/demos/Intel-BlueLens
 
