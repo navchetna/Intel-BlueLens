@@ -8,23 +8,27 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3003;
 
-// Serve built assets (JS, CSS, etc.) from dist at /intel-bluelens/assets/
-app.use('/intel-bluelens/assets', express.static(path.join(__dirname, 'dist', 'assets')));
-
-// Serve public directory files at /intel-bluelens/ (profiles-index.json, profiles/, etc.)
-app.use('/intel-bluelens/profiles', express.static(path.join(__dirname, 'public', 'profiles')));
-app.use('/intel-bluelens/traces', express.static(path.join(__dirname, 'public', 'traces')));
-app.use('/intel-bluelens/profiles-index.json', express.static(path.join(__dirname, 'public', 'profiles-index.json')));
-
-// Serve any other public files
-app.use('/intel-bluelens/public', express.static(path.join(__dirname, 'public')));
-
 // Redirect root to /intel-bluelens/
 app.get('/', (req, res) => {
   res.redirect(301, '/intel-bluelens/');
 });
 
-// Serve index.html for /intel-bluelens/ and all client-side routes
+// Serve all static files from dist at /intel-bluelens/ (includes assets, profiles, traces, etc.)
+// Vite automatically copies public/ to dist/ during build
+app.use('/intel-bluelens', express.static(path.join(__dirname, 'dist'), {
+  setHeaders: (res, filePath) => {
+    // Set proper MIME type for gzipped files
+    // DO NOT set Content-Encoding: gzip - the app handles decompression itself
+    if (filePath.endsWith('.gz')) {
+      res.setHeader('Content-Type', 'application/gzip');
+    }
+  },
+  fallthrough: true,  // Allow requests to continue if file not found
+  index: false        // Don't serve index.html automatically
+}));
+
+// Fallback: serve index.html for client-side routes (SPA)
+// This catches requests that didn't match any static file
 app.get('/intel-bluelens*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
@@ -32,4 +36,5 @@ app.get('/intel-bluelens*', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✓ Server running at http://0.0.0.0:${PORT}/intel-bluelens/`);
   console.log(`✓ Root redirects to /intel-bluelens/`);
+  console.log(`✓ Serving static files from dist/`);
 });

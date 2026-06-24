@@ -1224,10 +1224,21 @@ export default function PerformanceTab() {
     setParseError(false);
     try {
       const base = import.meta.env.BASE_URL || '/';
-      const r = await fetch(`${base}${profilePath}`);
+      const url = `${base}${profilePath}`;
+      console.log('Loading profile from:', url);
+      // Explicitly prevent browser from auto-decompressing gzip
+      const r = await fetch(url, {
+        headers: {
+          'Accept-Encoding': 'identity'  // Request uncompressed transfer
+        }
+      });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
       const arrayBuffer = await r.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      console.log('First 10 bytes:', Array.from(bytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+      console.log('Content-Type:', r.headers.get('Content-Type'));
+      console.log('Content-Encoding:', r.headers.get('Content-Encoding'));
 
       // Decompress .gz file
       const ds = new DecompressionStream('gzip');

@@ -10,8 +10,46 @@ export interface ArchitectureData {
 
 export const architecturesData: ArchitectureData[] = [
   {
-    id: 'plamo3',
-    name: 'Plamo 3',
+    id: 'gemma-3-4b-it',
+    name: 'Gemma 3 4B IT',
+    paradigm: 'Dense Causal Decoder with Multi-Head Attention & GeGLU.',
+    config: {
+      architectures: ["GemmaForCausalLM"],
+      hidden_size: 3072,
+      intermediate_size: 24576,
+      max_position_embeddings: 8192,
+      num_attention_heads: 16,
+      num_hidden_layers: 26,
+      num_key_value_heads: 16,
+      rms_norm_eps: 1e-06,
+      vocab_size: 256000,
+    },
+    components: [
+      {
+        group: 'Positional Embeddings',
+        name: 'Rotary Embedding (RoPE)',
+        desc: 'Rotary positional embeddings for relative position encoding.'
+      },
+      {
+        group: 'Attention Mechanism',
+        name: 'Multi-Head Attention',
+        desc: 'Standard multi-head attention with 16 heads.'
+      },
+      {
+        group: 'Activation & FFN',
+        name: 'GeGLU',
+        desc: 'GELU-Gated Linear Unit in the feed-forward network.'
+      },
+      {
+        group: 'Normalization',
+        name: 'RMSNorm',
+        desc: 'Root Mean Square Layer Normalization.'
+      }
+    ]
+  },
+  {
+    id: 'plamo-3-nict-2b',
+    name: 'PLaMo-3 NICT 2B',
     paradigm: 'Dense Causal Decoder with Standard MHA/GQA & SwiGLU, sliding window capability.',
     config: {
       architectures: ["Plamo3ForCausalLM"],
