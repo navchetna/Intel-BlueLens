@@ -6,7 +6,7 @@ import { tracePlugin } from './scripts/tracePlugin';
 
 export default defineConfig(() => {
   return {
-    base: '/intel-bluelens/',
+    base: '/intel-ai/intel-bluelens/',
     plugins: [react(), tailwindcss(), tracePlugin()],
     resolve: {
       alias: {
